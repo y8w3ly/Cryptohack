@@ -1,44 +1,94 @@
-#Just got those values from ecdsa.curve_256 from 
-from Crypto.Util.number import bytes_to_long
 from hashlib import sha1
-p = 115792089210356248762697446949407573530086143415290314195533631308867097853951
-a = -3
-b = 41058363725152142129326129780047268409114441015993725554835256314039467401291
-E = EllipticCurve(GF(p),[a,b])
-hidden_flag = E(16807196250009982482930925323199249441776811719221084165690521045921016398804, 72892323560996016030675756815328265928288098939353836408589138718802282948311)
-G = E.gens()[0]
-q = G.order()
-P = E(48780765048182146279105449292746800142985733726316629478905429239240156048277, 74172919609718191102228451394074168154654001177799772446328904575002795731796)
-msgs = [
-  "I have hidden the secret flag as a point of an elliptic curve using my private key.",
-  "The discrete logarithm problem is very hard to solve, so it will remain a secret forever.",
-  "Good luck!"
+from Crypto.Util.number import bytes_to_long, long_to_bytes
+from sage.all import *
+from ecdsa.ecdsa import curve_256, generator_256, Public_key, ellipticcurve
+
+# Given data
+hidden_flag = (16807196250009982482930925323199249441776811719221084165690521045921016398804, 72892323560996016030675756815328265928288098939353836408589138718802282948311)
+pubkey_point = (48780765048182146279105449292746800142985733726316629478905429239240156048277, 74172919609718191102228451394074168154654001177799772446328904575002795731796)
+sig_r = [
+    0x91f66ac7557233b41b3044ab9daf0ad891a8ffcaf99820c3cd8a44fc709ed3ae,
+    0xe8875e56b79956d446d24f06604b7705905edac466d5469f815547dea7a3171c,
+    0x566ce1db407edae4f32a20defc381f7efb63f712493c3106cf8e85f464351ca6
 ]
-rs = [0x91f66ac7557233b41b3044ab9daf0ad891a8ffcaf99820c3cd8a44fc709ed3ae,
-      0xe8875e56b79956d446d24f06604b7705905edac466d5469f815547dea7a3171c,
-      0x566ce1db407edae4f32a20defc381f7efb63f712493c3106cf8e85f464351ca6]
-ss = [0x1dd0a378454692eb4ad68c86732404af3e73c6bf23a8ecc5449500fcab05208d,
-      0x582ecf967e0e3acf5e3853dbe65a84ba59c3ec8a43951bcff08c64cb614023f8,
-      0x9e4304a36d2c83ef94e19a60fb98f659fa874bfb999712ceb58382e2ccda26ba]
-hs = [ Integer(bytes_to_long(sha1(m.encode()).digest())) for m in msgs ]
-mat = Matrix(ZZ, 2 + 3, 2 + 3)
-bias = 2^160
-mat[0,0] = bias
-mat[1,1] = bias // q
-for i in range(3):
-    inv_s = Integer(ss[i]).inverse_mod(q)
-    mat[0, 2+i] = (bias * (inv_s * hs[i] % q))  // q
-    mat[1, 2+i] = (bias * (inv_s * rs[i] % q))  // q
+sig_s = [
+    0x1dd0a378454692eb4ad68c86732404af3e73c6bf23a8ecc5449500fcab05208d,
+    0x582ecf967e0e3acf5e3853dbe65a84ba59c3ec8a43951bcff08c64cb614023f8,
+    0x9e4304a36d2c83ef94e19a60fb98f659fa874bfb999712ceb58382e2ccda26ba
+]
 
-for i in range(3):
-    mat[2+i, 2+i] = q
+messages = [
+    'I have hidden the secret flag as a point of an elliptic curve using my private key.',
+    'The discrete logarithm problem is very hard to solve, so it will remain a secret forever.',
+    'Good luck!'
+]
 
-L = mat.LLL()
-for v in L.rows():
-    ks = v[2:5]
-    for cand in [ks, [-k for k in ks]]:
-        d = ((ss[0]*cand[0] - hs[0]) * Integer(rs[0]).inverse_mod(q)) % q
-        if d*G == P:
-            print(d)
-            n = d
-            break
+# Curve parameters
+curve = curve_256
+
+G = generator_256
+n =G.order()
+# Compute message hashes
+h = [bytes_to_long(sha1(msg.encode()).digest()) for msg in messages]
+
+# Iterate over all possible sign combinations for s values (2^3 = 8 possibilities)
+from itertools import product
+
+# Generate all possible sign combinations (1 for original s, -1 for negated s)
+sign_combinations = list(product([1, -1], repeat=3))
+
+found = False
+for signs in sign_combinations:
+    A = []
+    B = []
+    for i in range(3):
+        s_i = (sig_s[i] * signs[i]) % n
+        s_inv = inverse_mod(s_i, n)
+        A_i = (sig_r[i] * s_inv) % n
+        B_i = (-h[i] * s_inv) % n
+        A.append(A_i)
+        B.append(B_i)
+    
+    # Lattice parameters for 3 signatures
+    K = 2**160  # Nonce size bound (SHA1 is 160 bits)
+    num_sigs = 3
+    
+    # Build the lattice basis matrix
+    m = matrix(ZZ, num_sigs + 1, num_sigs + 2)
+    for i in range(num_sigs):
+        m[i, i] = n
+        m[i, num_sigs] = A[i]
+    m[num_sigs, :num_sigs] = B
+    m[num_sigs, num_sigs] = K // n
+    m[num_sigs, num_sigs + 1] = K
+    
+    # Perform LLL reduction
+    m_lll = m.LLL()
+    
+    # Extract private key d
+    for row in m_lll:
+        if row[-1] == K:
+            d_candidate = (row[-2] * n) // K
+            # Verify candidate against public key
+            try:
+                candidate_pub = Public_key(G, d_candidate * G)
+                if (candidate_pub.point.x(), candidate_pub.point.y()) == pubkey_point:
+                    d = d_candidate % n
+                    found = True
+                    break
+            except:
+                continue
+    if found:
+        break
+
+if not found:
+    raise ValueError("Private key not found")
+
+# Recover the flag
+Tx, Ty = hidden_flag
+T = ellipticcurve.Point(curve, Tx, Ty)
+Q = inverse_mod(d, n) * T
+flag = long_to_bytes(int(Q.x())).decode()
+
+print(f"Private Key d: {d}")
+print(f"Flag: {flag}")
